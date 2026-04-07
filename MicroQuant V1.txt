@@ -1,0 +1,199 @@
+"""
+MICROTUBULE LATTICE QUANTUM PROCESSOR SIMULATOR
+================================================
+A self-contained quantum computing engine modeling a 1D lattice of coupled qubits
+with dipole interactions. Implements coherent evolution, entanglement generation,
+and threshold-based collapse as a non-standard readout mechanism.
+
+Features:
+- QuTiP-based simulation of small lattice (N qubits)
+- Dipole Hamiltonian (local terms + nearest-neighbor XY couplings)
+- Unitary evolution for quantum processing
+- Threshold-based collapse (energy-separation triggered measurement)
+- Noise/decoherence channel for error testing
+- Metrics: coherence, entanglement entropy
+- Simple visualization of lattice states and metrics
+
+Requirements:
+    pip install numpy matplotlib qutip scipy
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+import qutip as qt
+from typing import Tuple, List, Dict
+
+# ========================== CONSTANTS ==========================
+N_QUBITS = 8                      # Lattice size (small for speed; real lattices much larger)
+GAMMA_FREQ = 40e9                 # Characteristic frequency (arbitrary units for oscillation)
+DECOHERENCE_RATE = 0.1            # Base noise strength
+COLLAPSE_THRESHOLD = 0.85         # Energy separation threshold for collapse/readout
+DT = 0.01                         # Time step
+SIM_TIME = 5.0                    # Total simulation time
+
+
+class LatticeQubit:
+    """Single qubit with dipole-like local Hamiltonian."""
+    def __init__(self, index: int):
+        self.index = index
+        self.state = qt.basis(2, 0)  # Start in |0>
+
+    def local_hamiltonian(self, coupling_strength: float = 1.0) -> qt.Qobj:
+        """Local dipole energy + small tunneling term."""
+        return coupling_strength * (0.5 * qt.sigmaz() + 0.1 * qt.sigmax())
+
+
+class QuantumLatticeProcessor:
+    """1D lattice quantum processor with coupled qubits."""
+    
+    def __init__(self, n_qubits: int = N_QUBITS):
+        self.n = n_qubits
+        self.qubits = [LatticeQubit(i) for i in range(n)]
+        self.hamiltonian = self._build_hamiltonian()
+        self.current_state = qt.tensor([q.state for q in self.qubits])
+        self.time_series: List[float] = []
+        self.coherence_history: List[float] = []
+        self.entanglement_history: List[float] = []
+
+    def _build_hamiltonian(self) -> qt.Qobj:
+        """Build dipole + nearest-neighbor XY Hamiltonian."""
+        H = 0 * qt.tensor([qt.qeye(2) for _ in range(self.n)])
+        
+        # Local terms
+        for i in range(self.n):
+            local_op = qt.tensor([qt.qeye(2)] * i + [self.qubits[i].local_hamiltonian()] +
+                                 [qt.qeye(2)] * (self.n - i - 1))
+            H += local_op
+        
+        # Nearest-neighbor coupling (XY model for coherent transfer/entanglement)
+        J = 2.0
+        for i in range(self.n - 1):
+            sigma_plus_i = qt.tensor([qt.qeye(2)] * i + [qt.sigmap()] + [qt.qeye(2)] * (self.n - i - 1))
+            sigma_minus_j = qt.tensor([qt.qeye(2)] * (i + 1) + [qt.sigmam()] + [qt.qeye(2)] * (self.n - i - 2))
+            H += J * (sigma_plus_i * sigma_minus_j.dag() + sigma_plus_i.dag() * sigma_minus_j)
+        return H
+
+    def evolve(self, t_list: np.ndarray) -> None:
+        """Coherent unitary evolution."""
+        result = qt.mesolve(self.hamiltonian, self.current_state, t_list, c_ops=[])
+        self.current_state = result.states[-1]
+        self.time_series.append(t_list[-1])
+        self.coherence_history.append(self._measure_coherence())
+        self.entanglement_history.append(self._measure_entanglement())
+
+    def apply_noise(self, strength: float = DECOHERENCE_RATE):
+        """General decoherence/noise channel (dephasing + damping)."""
+        c_ops = []
+        for i in range(self.n):
+            proj = qt.tensor([qt.qeye(2)] * i + [qt.sigmam()] + [qt.qeye(2)] * (self.n - i - 1))
+            c_ops.append(np.sqrt(strength) * proj)
+        result = qt.mesolve(self.hamiltonian, self.current_state, [0, DT], c_ops=c_ops)
+        self.current_state = result.states[-1]
+
+    def _measure_coherence(self) -> float:
+        """Global coherence metric (example off-diagonal element)."""
+        rho = self.current_state * self.current_state.dag()
+        off_diag = np.abs(rho.full()[0, -1])
+        return float(off_diag)
+
+    def _measure_entanglement(self) -> float:
+        """Bipartite entanglement entropy (half-chain)."""
+        rho = self.current_state * self.current_state.dag()
+        half = self.n // 2
+        rho_A = qt.ptrace(rho, list(range(half)))
+        evals = rho_A.eigenenergies()
+        evals = evals[evals > 1e-12]
+        entropy = -np.sum(evals * np.log2(evals + 1e-12))
+        return float(entropy)
+
+    def threshold_collapse(self) -> Dict:
+        """Threshold-based collapse/readout when energy separation exceeds limit."""
+        energy = qt.expect(self.hamiltonian, self.current_state)
+        if abs(energy) > COLLAPSE_THRESHOLD:
+            probs = np.abs(self.current_state.full().flatten()) ** 2
+            outcome_idx = np.random.choice(range(2**self.n), p=probs)
+            collapsed = qt.basis(2**self.n, outcome_idx)
+            self.current_state = collapsed
+            bitstring = bin(outcome_idx)[2:].zfill(self.n)
+            return {"collapsed": True, "outcome": bitstring, "energy": energy}
+        return {"collapsed": False, "outcome": None, "energy": energy}
+
+
+# ========================== VISUALIZATION ==========================
+class LatticeVisualizer:
+    def __init__(self, processor: QuantumLatticeProcessor):
+        self.processor = processor
+
+    def plot_metrics(self):
+        """Plot coherence and entanglement over time."""
+        fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+        axs[0].plot(self.processor.time_series, self.processor.coherence_history, 'g-', label='Coherence')
+        axs[0].set_ylabel('Coherence')
+        axs[0].legend()
+        axs[0].grid(True)
+        
+        axs[1].plot(self.processor.time_series, self.processor.entanglement_history, 'orange', label='Entanglement Entropy')
+        axs[1].set_xlabel('Time')
+        axs[1].set_ylabel('Entanglement')
+        axs[1].legend()
+        axs[1].grid(True)
+        
+        plt.suptitle('Quantum Lattice Processor Metrics')
+        plt.tight_layout()
+        plt.savefig("lattice_processor_metrics.png", dpi=200)
+        print("✅ Metrics plot saved as 'lattice_processor_metrics.png'")
+        plt.show()
+
+    def plot_lattice_state(self, ax, title: str):
+        """Simple visualization of lattice qubit states."""
+        ax.set_title(title)
+        ax.set_xlim(0, self.processor.n + 1)
+        ax.set_ylim(0, 3)
+        for i in range(self.processor.n):
+            # Represent state amplitude roughly
+            prob_1 = np.abs(self.processor.current_state.full()[2**i]) ** 2  # simplistic
+            color = 'blue' if prob_1 < 0.5 else 'red'
+            ax.add_patch(plt.Rectangle((i + 0.2, 1), 0.6, 1.5, color=color, alpha=0.7))
+            ax.text(i + 0.5, 0.5, f'Q{i}', ha='center')
+        ax.set_yticks([])
+        ax.set_xticks(range(self.processor.n))
+
+
+# ========================== MAIN ENGINE ==========================
+def run_quantum_processor_experiment():
+    print("🚀 Initializing Quantum Lattice Processor Simulator...")
+    processor = QuantumLatticeProcessor(n_qubits=N_QUBITS)
+    viz = LatticeVisualizer(processor)
+
+    print("   Running coherent quantum evolution...")
+    t_steps = np.arange(0, SIM_TIME, DT)
+    for step in range(len(t_steps) // 10):
+        t_chunk = t_steps[step*10:(step+1)*10]
+        processor.evolve(t_chunk)
+        
+        # Occasional threshold collapse (as computational readout)
+        if step % 5 == 0:
+            result = processor.threshold_collapse()
+            if result["collapsed"]:
+                print(f"   → Threshold collapse at t≈{t_chunk[-1]:.2f} | Outcome: {result['outcome']}")
+
+    print("   Applying noise channel for robustness test...")
+    for _ in range(10):
+        processor.apply_noise()
+
+    # Final metrics
+    print(f"\n📊 FINAL RESULTS")
+    print(f"   Peak coherence: {max(processor.coherence_history):.4f}")
+    print(f"   Final coherence: {processor.coherence_history[-1]:.4f}")
+    print(f"   Max entanglement: {max(processor.entanglement_history):.4f}")
+
+    # Generate outputs
+    viz.plot_metrics()
+
+    print("\n✅ Quantum processor simulation complete!")
+    print("   This models a dipole-coupled lattice as a quantum computing substrate.")
+    print("   Input: initial state | Evolution: Hamiltonian | Readout: threshold collapse")
+
+
+if __name__ == "__main__":
+    run_quantum_processor_experiment()
